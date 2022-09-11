@@ -49,7 +49,7 @@ pub fn build_signature(data: String, header: String, current_time: SystemTime) -
     );
     let key = hmac::Key::new(hmac::HMAC_SHA256, creds.as_ref());
     let signature = hmac::sign(&key, string_to_sign.as_bytes());
-    return pretty_tag(signature);
+    pretty_tag(signature)
 }
 
 pub fn build_authorization_token(signature: String) -> String {
@@ -58,12 +58,12 @@ pub fn build_authorization_token(signature: String) -> String {
 
 pub fn pretty_tag(tag: Tag) -> String {
     let pretty_format = format!("{:?}", tag);
-    return pretty_format[11..pretty_format.len() - 1].to_string();
+    pretty_format[11..pretty_format.len() - 1].to_string()
 }
 
 pub fn pretty_sha256(digest: Digest) -> String {
     let pretty_format = format!("{:?}", digest);
-    return pretty_format[7..pretty_format.len()].to_string();
+    pretty_format[7..pretty_format.len()].to_string()
 }
 
 pub fn build_canonical_string(current_time: SystemTime, body: String) -> String {
@@ -75,7 +75,7 @@ pub fn build_canonical_string(current_time: SystemTime, body: String) -> String 
         canonical_headers,
         pretty_sha256(digest)
     );
-    return return_string;
+    return_string
 }
 
 fn sha256_digest<R: Read>(mut reader: R) -> Result<Digest> {
@@ -165,8 +165,8 @@ fn send(current_time: SystemTime, authorization_token: String) -> Result<bool> {
         transfer.read_function(|buf| Ok(data.read(buf).unwrap_or(0)))?;
         transfer.perform()?;
     }
-    return match easy.response_code() {
+    match easy.response_code() {
         Ok(code) => Ok(code < 300),
         Err(_) => Ok(false),
-    };
+    }
 }
