@@ -1,0 +1,16 @@
+[package]
+name = "fast_secret"
+version = "1.0.0"
+authors = ["Maxime DAVID <got2bex@gmail.com>"]
+edition = "2021"
+
+[dependencies] 
+curl = "0.4.44"
+ring = "0.16.20"
+time = "0.3.5"
+
+[profile.release]
+opt-level = 'z'
+lto = true
+codegen-units = 1
+panic = 'abort'
