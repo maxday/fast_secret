@@ -2,9 +2,6 @@ use std::time::SystemTime;
 use time::OffsetDateTime;
 
 use curl::easy::{Easy, List};
-
-use std::io::stdout;
-use std::io::Write;
 use std::io::{Read, Result};
 
 use std::io::BufReader;
@@ -13,29 +10,30 @@ use ring::hmac::{self, Tag};
 
 use ring::digest::{Context, Digest, SHA256};
 
-const REGION: &str = "us-east-1";
 const SERVICE_NAME: &str = "kms";
-const SECRET_ACCESS_KEY: &str = "YHlRKoA53PUHMA+qxWDL6pXBiGuw9+k4Y0Ilzr/H";
 const AUTH_HEDER_PREFIX: &str = "AWS4-HMAC-SHA256";
 
 fn main() {
+    let region = std::env::var("AWS_REGION").unwrap();
+    let function_name = std::env::var("AWS_LAMBDA_FUNCTION_NAME").unwrap();
+    let encrypted_data = std::env::var("DD_KMS_API_KEY").unwrap();
     let current_time = SystemTime::now();
-    let data = "{\"CiphertextBlob\":\"AQICAHicZZM/gbA5Dy16gHH+DsBSqIWFNpchG6RdjVjemTte6AHxU/ZvRbmqrtVthi/nSO0rAAAAYjBgBgkqhkiG9w0BBwagUzBRAgEAMEwGCSqGSIb3DQEHATAeBglghkgBZQMEAS4wEQQMWbAa7s6RTm548/liAgEQgB9GCHlXeBaLt1OkwIN0i275tcMHNuMzcybSR5FN/bQn\",\"EncryptionContext\":{\"LambdaFunctionName\":\"lambda-perf-provided\"}}";
+
+    let data = format!("{{\"CiphertextBlob\":\"{}\",\"EncryptionContext\":{{\"LambdaFunctionName\":\"{}\"}}}}", encrypted_data, function_name);
     let signature = build_signature(
         data.to_string(),
-        "20220911/us-east-1/kms/aws4_request".to_string(),
+        format!("{}/{}/kms/aws4_request", format_date(current_time), region).to_string(),
         current_time,
     );
-    println!("signature = {}", signature);
-    let authorization_token = build_authorization_token(signature);
-    println!("authorization_token = {}", authorization_token);
-    send(current_time, authorization_token).unwrap();
+    let authorization_token = build_authorization_token(current_time, signature);
+    send(current_time, data, authorization_token).unwrap();
 }
 
 pub fn build_signature(data: String, header: String, current_time: SystemTime) -> String {
-    let creds = derive_signing_key(REGION, SERVICE_NAME, SECRET_ACCESS_KEY, current_time);
+    let region = std::env::var("AWS_REGION").unwrap();
+    let secret_access_key = std::env::var("AWS_SECRET_ACCESS_KEY").unwrap();
 
-    println!("CRED = {}", pretty_tag(creds));
+    let creds = derive_signing_key(&region, SERVICE_NAME, &secret_access_key, current_time);
 
     let canonical_string = build_canonical_string(current_time, data);
     let reader = BufReader::new(canonical_string.as_bytes());
@@ -52,8 +50,10 @@ pub fn build_signature(data: String, header: String, current_time: SystemTime) -
     pretty_tag(signature)
 }
 
-pub fn build_authorization_token(signature: String) -> String {
-    return format!("AWS4-HMAC-SHA256 Credential=AKIATVJA2RVZV5PFGXUP/20220911/us-east-1/kms/aws4_request, SignedHeaders=content-length;content-type;host;x-amz-date;x-amz-target, Signature={}", signature);
+pub fn build_authorization_token(current_time: SystemTime, signature: String) -> String {
+    let region = std::env::var("AWS_REGION").unwrap();
+    let access_key_id = std::env::var("AWS_ACCESS_KEY_ID").unwrap();
+    return format!("AWS4-HMAC-SHA256 Credential={}/{}/{}/kms/aws4_request, SignedHeaders=content-length;content-type;host;x-amz-date;x-amz-security-token;x-amz-target, Signature={}", access_key_id, format_date(current_time), region, signature);
 }
 
 pub fn pretty_tag(tag: Tag) -> String {
@@ -67,11 +67,13 @@ pub fn pretty_sha256(digest: Digest) -> String {
 }
 
 pub fn build_canonical_string(current_time: SystemTime, body: String) -> String {
+    let region = std::env::var("AWS_REGION").unwrap();
     let reader = BufReader::new(body.as_bytes());
     let digest = sha256_digest(reader).unwrap();
-    let canonical_headers = format!("content-length:295\ncontent-type:application/x-amz-json-1.1\nhost:kms.us-east-1.amazonaws.com\nx-amz-date:{}\nx-amz-target:TrentService.Decrypt\n", format_date_time(current_time));
+    let session_token = std::env::var("AWS_SESSION_TOKEN").unwrap();
+    let canonical_headers = format!("content-length:{}\ncontent-type:application/x-amz-json-1.1\nhost:kms.{}.amazonaws.com\nx-amz-date:{}\nx-amz-security-token:{}\nx-amz-target:TrentService.Decrypt\n", body.len(), region, format_date_time(current_time), session_token);
     let return_string = format!(
-        "POST\n/\n\n{}\ncontent-length;content-type;host;x-amz-date;x-amz-target\n{}",
+        "POST\n/\n\n{}\ncontent-length;content-type;host;x-amz-date;x-amz-security-token;x-amz-target\n{}",
         canonical_headers,
         pretty_sha256(digest)
     );
@@ -138,35 +140,47 @@ pub fn format_date_time(time: SystemTime) -> String {
     )
 }
 
-fn send(current_time: SystemTime, authorization_token: String) -> Result<bool> {
-    let mut data = "{\"CiphertextBlob\":\"AQICAHicZZM/gbA5Dy16gHH+DsBSqIWFNpchG6RdjVjemTte6AHxU/ZvRbmqrtVthi/nSO0rAAAAYjBgBgkqhkiG9w0BBwagUzBRAgEAMEwGCSqGSIb3DQEHATAeBglghkgBZQMEAS4wEQQMWbAa7s6RTm548/liAgEQgB9GCHlXeBaLt1OkwIN0i275tcMHNuMzcybSR5FN/bQn\",\"EncryptionContext\":{\"LambdaFunctionName\":\"lambda-perf-provided\"}}".as_bytes();
+fn send(current_time: SystemTime, data: String, authorization_token: String) -> Result<bool> {
+    let region = std::env::var("AWS_REGION").unwrap();
+    let session_token = std::env::var("AWS_SESSION_TOKEN").unwrap();
     let mut easy = Easy::new();
-    easy.url("https://kms.us-east-1.amazonaws.com")?;
+    easy.url(format!("https://kms.{}.amazonaws.com", region).as_str())?;
     easy.post(true)?;
     easy.post_field_size(data.len() as u64)?;
 
     let mut list = List::new();
     list.append("X-Amz-Target: TrentService.Decrypt")?;
     list.append("Content-Type: application/x-amz-json-1.1")?;
-    list.append("Content-Length: 295")?;
+    list.append(format!("Content-Length: {}", data.len()).as_str())?;
     list.append(format!("X-Amz-Date: {}", format_date_time(current_time)).as_str())?;
     list.append(format!("Authorization: {}", authorization_token).as_str())?;
+    list.append(format!("X-Amz-Security-Token: {}", session_token).as_str())?;
 
     easy.http_headers(list)?;
 
     easy.write_function(|data| {
-        stdout().write_all(data).unwrap();
+        println!("{}", extract_data(data));
         Ok(data.len())
     })
     .unwrap();
 
     {
         let mut transfer = easy.transfer();
-        transfer.read_function(|buf| Ok(data.read(buf).unwrap_or(0)))?;
+        transfer.read_function(|buf| Ok(data.as_bytes().read(buf).unwrap_or(0)))?;
         transfer.perform()?;
     }
     match easy.response_code() {
         Ok(code) => Ok(code < 300),
         Err(_) => Ok(false),
     }
+}
+
+pub fn extract_data(json_response: &[u8]) -> String {
+    let json = std::str::from_utf8(json_response).unwrap().to_string();
+    let res = json.find("\"Plaintext\"").unwrap();
+    let plaintext = json[res..json.len()].to_string();
+    let mut tokens = plaintext.split("\"");
+    let result = tokens.nth(3).unwrap();
+    let decoded = base64::decode(result).unwrap();
+    std::str::from_utf8(&decoded).unwrap().to_string()
 }
