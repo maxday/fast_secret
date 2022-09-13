@@ -3,45 +3,67 @@ use time::OffsetDateTime;
 
 use curl::easy::{Easy, List};
 use std::io::{Read, Result};
-
 use std::io::BufReader;
 
 use ring::hmac::{self, Tag};
 
 use ring::digest::{Context, Digest, SHA256};
 
-const SERVICE_NAME: &str = "kms";
 const AUTH_HEDER_PREFIX: &str = "AWS4-HMAC-SHA256";
 
-fn main() {
-    let region = std::env::var("AWS_REGION").unwrap();
-    let function_name = std::env::var("AWS_LAMBDA_FUNCTION_NAME").unwrap();
-    let encrypted_data = std::env::var("DD_KMS_API_KEY").unwrap();
-    let current_time = SystemTime::now();
-
-    let data = format!("{{\"CiphertextBlob\":\"{}\",\"EncryptionContext\":{{\"LambdaFunctionName\":\"{}\"}}}}", encrypted_data, function_name);
-    let signature = build_signature(
-        data.to_string(),
-        format!("{}/{}/kms/aws4_request", format_date(current_time), region).to_string(),
-        current_time,
-    );
-    let authorization_token = build_authorization_token(current_time, signature);
-    send(current_time, data, authorization_token).unwrap();
+pub struct AuthenticationContext {
+    region: String,
+    function_name: String,
+    access_key_id: String,
+    secret_access_key: String,
+    session_token: String,
+    current_time: SystemTime,
 }
 
-pub fn build_signature(data: String, header: String, current_time: SystemTime) -> String {
-    let region = std::env::var("AWS_REGION").unwrap();
-    let secret_access_key = std::env::var("AWS_SECRET_ACCESS_KEY").unwrap();
+impl AuthenticationContext {
+    pub fn new() -> AuthenticationContext {
+        let region = std::env::var("AWS_REGION").expect("Could not find AWS_REGION value");
+        let function_name = std::env::var("AWS_LAMBDA_FUNCTION_NAME").expect("Could not find AWS_LAMBDA_FUNCTION_NAME value");
+        let access_key_id = std::env::var("AWS_ACCESS_KEY_ID").expect("Could not find AWS_ACCESS_KEY_ID value");
+        let secret_access_key = std::env::var("AWS_SECRET_ACCESS_KEY").expect("Could not find AWS_SECRET_ACCESS_KEY value");
+        let session_token = std::env::var("AWS_SESSION_TOKEN").expect("Could not find AWS_SESSION_TOKEN value");
+        AuthenticationContext { 
+            region,
+            function_name,
+            access_key_id,
+            secret_access_key,
+            session_token,
+            current_time: SystemTime::now()
+        }
+    }
+}
 
-    let creds = derive_signing_key(&region, SERVICE_NAME, &secret_access_key, current_time);
+fn main() {
+    let kms_api_key = std::env::var("DD_KMS_API_KEY").expect("Could not find DD_KMS_API_KEY");
+    let auth_context = AuthenticationContext::new();
+    let data = format!("{{\"CiphertextBlob\":\"{}\",\"EncryptionContext\":{{\"LambdaFunctionName\":\"{}\"}}}}", kms_api_key, auth_context.function_name);
+    let signature = build_signature(
+        data.to_string(),
+        build_header(&auth_context),
+        &auth_context,
+    );
+    let authorization_token = build_authorization_token(&auth_context, signature);
+    send(&auth_context, data, authorization_token).unwrap();
+}
 
-    let canonical_string = build_canonical_string(current_time, data);
+pub fn build_header(auth_context: &AuthenticationContext) -> String {
+    format!("{}/{}/kms/aws4_request", format_date(auth_context.current_time), auth_context.region).to_string()
+}
+
+pub fn build_signature(data: String, header: String, auth_context: &AuthenticationContext) -> String {
+    let creds = derive_signing_key(auth_context);
+    let canonical_string = build_canonical_string(auth_context, data);
     let reader = BufReader::new(canonical_string.as_bytes());
     let digest = sha256_digest(reader).unwrap();
     let string_to_sign = format!(
         "{}\n{}\n{}\n{}",
         AUTH_HEDER_PREFIX,
-        format_date_time(current_time),
+        format_date_time(auth_context.current_time),
         header,
         pretty_sha256(digest)
     );
@@ -50,10 +72,8 @@ pub fn build_signature(data: String, header: String, current_time: SystemTime) -
     pretty_tag(signature)
 }
 
-pub fn build_authorization_token(current_time: SystemTime, signature: String) -> String {
-    let region = std::env::var("AWS_REGION").unwrap();
-    let access_key_id = std::env::var("AWS_ACCESS_KEY_ID").unwrap();
-    return format!("AWS4-HMAC-SHA256 Credential={}/{}/{}/kms/aws4_request, SignedHeaders=content-length;content-type;host;x-amz-date;x-amz-security-token;x-amz-target, Signature={}", access_key_id, format_date(current_time), region, signature);
+pub fn build_authorization_token(auth_context: &AuthenticationContext, signature: String) -> String {
+    return format!("AWS4-HMAC-SHA256 Credential={}/{}/{}/kms/aws4_request, SignedHeaders=content-length;content-type;host;x-amz-date;x-amz-security-token;x-amz-target, Signature={}", auth_context.access_key_id, format_date(auth_context.current_time), auth_context.region, signature);
 }
 
 pub fn pretty_tag(tag: Tag) -> String {
@@ -66,12 +86,10 @@ pub fn pretty_sha256(digest: Digest) -> String {
     pretty_format[7..pretty_format.len()].to_string()
 }
 
-pub fn build_canonical_string(current_time: SystemTime, body: String) -> String {
-    let region = std::env::var("AWS_REGION").unwrap();
+pub fn build_canonical_string(auth_context: &AuthenticationContext, body: String) -> String {
     let reader = BufReader::new(body.as_bytes());
     let digest = sha256_digest(reader).unwrap();
-    let session_token = std::env::var("AWS_SESSION_TOKEN").unwrap();
-    let canonical_headers = format!("content-length:{}\ncontent-type:application/x-amz-json-1.1\nhost:kms.{}.amazonaws.com\nx-amz-date:{}\nx-amz-security-token:{}\nx-amz-target:TrentService.Decrypt\n", body.len(), region, format_date_time(current_time), session_token);
+    let canonical_headers = format!("content-length:{}\ncontent-type:application/x-amz-json-1.1\nhost:kms.{}.amazonaws.com\nx-amz-date:{}\nx-amz-security-token:{}\nx-amz-target:TrentService.Decrypt\n", body.len(), auth_context.region, format_date_time(auth_context.current_time),auth_context.session_token);
     let return_string = format!(
         "POST\n/\n\n{}\ncontent-length;content-type;host;x-amz-date;x-amz-security-token;x-amz-target\n{}",
         canonical_headers,
@@ -94,26 +112,15 @@ fn sha256_digest<R: Read>(mut reader: R) -> Result<Digest> {
     Ok(context.finish())
 }
 
-pub fn derive_signing_key(
-    region: &str,
-    service: &str,
-    secret: &str,
-    time: SystemTime,
-) -> hmac::Tag {
-    let secret = format!("AWS4{}", secret);
-    let secret = hmac::Key::new(hmac::HMAC_SHA256, secret.as_bytes());
-    let tag = hmac::sign(&secret, format_date(time).as_bytes());
-
-    // sign region
-    let key = hmac::Key::new(hmac::HMAC_SHA256, tag.as_ref());
-    let tag = hmac::sign(&key, region.as_bytes());
-
-    // sign service
-    let key = hmac::Key::new(hmac::HMAC_SHA256, tag.as_ref());
-    let tag = hmac::sign(&key, service.as_bytes());
-
-    // sign request
-    let key = hmac::Key::new(hmac::HMAC_SHA256, tag.as_ref());
+pub fn derive_signing_key(auth_context: &AuthenticationContext) -> hmac::Tag {
+    let secret = format!("AWS4{}", auth_context.secret_access_key);
+    let key = hmac::Key::new(hmac::HMAC_SHA256, secret.as_bytes());
+    let date_tag = hmac::sign(&key, format_date(auth_context.current_time).as_bytes());
+    let key = hmac::Key::new(hmac::HMAC_SHA256, date_tag.as_ref());
+    let region_tag = hmac::sign(&key, auth_context.region.as_bytes());
+    let key = hmac::Key::new(hmac::HMAC_SHA256, region_tag.as_ref());
+    let kms_tag = hmac::sign(&key, "kms".as_bytes());
+    let key = hmac::Key::new(hmac::HMAC_SHA256, kms_tag.as_ref());
     hmac::sign(&key, "aws4_request".as_bytes())
 }
 
@@ -140,11 +147,9 @@ pub fn format_date_time(time: SystemTime) -> String {
     )
 }
 
-fn send(current_time: SystemTime, data: String, authorization_token: String) -> Result<bool> {
-    let region = std::env::var("AWS_REGION").unwrap();
-    let session_token = std::env::var("AWS_SESSION_TOKEN").unwrap();
+fn send(auth_context: &AuthenticationContext, data: String, authorization_token: String) -> Result<bool> {
     let mut easy = Easy::new();
-    easy.url(format!("https://kms.{}.amazonaws.com", region).as_str())?;
+    easy.url(format!("https://kms.{}.amazonaws.com", auth_context.region).as_str())?;
     easy.post(true)?;
     easy.post_field_size(data.len() as u64)?;
 
@@ -152,9 +157,9 @@ fn send(current_time: SystemTime, data: String, authorization_token: String) -> 
     list.append("X-Amz-Target: TrentService.Decrypt")?;
     list.append("Content-Type: application/x-amz-json-1.1")?;
     list.append(format!("Content-Length: {}", data.len()).as_str())?;
-    list.append(format!("X-Amz-Date: {}", format_date_time(current_time)).as_str())?;
+    list.append(format!("X-Amz-Date: {}", format_date_time(auth_context.current_time)).as_str())?;
     list.append(format!("Authorization: {}", authorization_token).as_str())?;
-    list.append(format!("X-Amz-Security-Token: {}", session_token).as_str())?;
+    list.append(format!("X-Amz-Security-Token: {}", auth_context.session_token).as_str())?;
 
     easy.http_headers(list)?;
 
