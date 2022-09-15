@@ -9,6 +9,10 @@ curl = "0.4.44"
 ring = "0.16.20"
 time = "0.3.5"
 base64 = "0.13.0"
+hex = "0.4.3"
+
+[dev-dependencies]
+regex = "1.6.0"
 
 [profile.release]
 opt-level = 'z'
