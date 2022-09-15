@@ -6,7 +6,7 @@ use time::OffsetDateTime;
 
 use curl::easy::{Easy, List};
 
-use ring::hmac::{self, Tag};
+use ring::hmac::{self};
 use ring::digest::{Context, Digest, SHA256};
 
 const ENV_REGION: &str = "AWS_REGION";
@@ -71,7 +71,7 @@ pub fn decrypt(cipher_blob: &str, full_json: bool) -> Result<String> {
     let function_name = auth_context.function_name.clone();
     let payload = build_payload(cipher_blob, function_name.as_str());
     let api_result = send(&auth_context, payload.as_str())?;
-    return Ok(format_result(&api_result, full_json))
+    return Ok(format_response(&api_result, full_json))
 }
 
 //tested
@@ -110,16 +110,6 @@ pub fn build_authorization_token(auth_context: &AuthenticationContext, signature
 }
 
 // tested
-pub fn pretty_tag(tag: Tag) -> String {
-    let pretty_format = format!("{:?}", tag);
-    pretty_format[11..pretty_format.len() - 1].to_string()
-}
-
-pub fn pretty_sha256(digest: Digest) -> String {
-    let pretty_format = format!("{:?}", digest);
-    pretty_format[7..pretty_format.len()].to_string()
-}
-
 pub fn build_canonical_string(auth_context: &AuthenticationContext, body: &str) -> String {
     let reader = BufReader::new(body.as_bytes());
     let digest = sha256_digest(reader).unwrap();
@@ -127,15 +117,15 @@ pub fn build_canonical_string(auth_context: &AuthenticationContext, body: &str) 
     let return_string = format!(
         "POST\n/\n\n{}\ncontent-length;content-type;host;x-amz-date;x-amz-security-token;x-amz-target\n{}",
         canonical_headers,
-        pretty_sha256(digest)
+        hex::encode(digest)
     );
     return_string
 }
 
+// tested
 fn sha256_digest<R: Read>(mut reader: R) -> Result<Digest> {
     let mut context = Context::new(&SHA256);
     let mut buffer = [0; 1024];
-
     loop {
         let count = reader.read(&mut buffer)?;
         if count == 0 {
@@ -145,6 +135,7 @@ fn sha256_digest<R: Read>(mut reader: R) -> Result<Digest> {
     }
     Ok(context.finish())
 }
+
 
 pub fn derive_signing_key(auth_context: &AuthenticationContext) -> hmac::Tag {
     let secret = format!("AWS4{}", auth_context.secret_access_key);
@@ -181,7 +172,7 @@ pub fn format_date_time(time: SystemTime) -> String {
     )
 }
 
-
+//tested
 fn build_header_list(auth_context: &AuthenticationContext, payload: &str) -> Result<List> {
     let content_length = payload.len();
     let signature = build_signature( payload,
@@ -222,10 +213,10 @@ fn send(auth_context: &AuthenticationContext, data: &str) -> Result<Vec<u8>> {
     return Ok(dst);
 }
 
-pub fn format_result(json_response: &[u8], full_json: bool) -> String {
-    let json = std::str::from_utf8(json_response).unwrap().to_string();
+pub fn format_response(json_response: &[u8], full_json: bool) -> String {
+    let json = String::from_utf8_lossy(json_response);
     if full_json {
-        return json
+        return json.to_string();
     }
     let res = json.find("\"Plaintext\"").unwrap();
     let plaintext = json[res..json.len()].to_string();
@@ -234,8 +225,6 @@ pub fn format_result(json_response: &[u8], full_json: bool) -> String {
     let decoded = base64::decode(result).unwrap();
     std::str::from_utf8(&decoded).unwrap().to_string()
 }
-
-
 
 #[cfg(test)]
 mod tests {
@@ -278,6 +267,42 @@ mod tests {
         let result = build_signature("test-data", headers, &auth_context);
         unset_test_env();
         assert_eq!("2d00a717685bf2e0b2b3b70f8718d0b9cbe28875da76cb10600b06e88f213b7a", result);
+    }
+
+    #[test]
+    fn test_build_canonical_string() {
+        set_test_env();
+        let auth_context = AuthenticationContext::with_time("20220101", "20220101T010203Z");
+        let result = build_canonical_string(&auth_context, "test-data");
+        unset_test_env();
+        assert_eq!("POST\n/\n\ncontent-length:9\ncontent-type:application/x-amz-json-1.1\nhost:kms.test-region.amazonaws.com\nx-amz-date:20220101T010203Z\nx-amz-security-token:test-session-token\nx-amz-target:TrentService.Decrypt\n\ncontent-length;content-type;host;x-amz-date;x-amz-security-token;x-amz-target\na186000422feab857329c684e9fe91412b1a5db084100b37a98cfc95b62aa867", result);
+    }
+
+    #[test]
+    fn test_build_header_list() {
+        set_test_env();
+        let auth_context = AuthenticationContext::with_time("20220101", "20220101T010203Z");
+        let result = build_header_list(&auth_context, "test-data").unwrap();
+        unset_test_env();
+        let mut expected = vec![
+            "X-Amz-Security-Token: test-session-token",
+            "Authorization: AWS4-HMAC-SHA256 Credential=test-access-key/20220101/test-region/kms/aws4_request, SignedHeaders=content-length;content-type;host;x-amz-date;x-amz-security-token;x-amz-target, Signature=2d00a717685bf2e0b2b3b70f8718d0b9cbe28875da76cb10600b06e88f213b7a",
+            "X-Amz-Date: 20220101T010203Z",
+            "Content-Length: 9",   
+            "Content-Type: application/x-amz-json-1.1", 
+            "X-Amz-Target: TrentService.Decrypt",    
+        ];
+        let mut item_count = 0;
+        for val in result.iter() {
+            item_count += 1;
+            assert_eq!(expected.pop().unwrap(), String::from_utf8_lossy(val));    
+        }
+        assert_eq!(6, item_count);
+    }
+
+    #[test]
+    fn test_format_response() {
+        assert_eq!("{\"blablabla\":true}", format_response(b"{\"blablabla\":true}", true));
     }
 
     fn set_test_env() {
